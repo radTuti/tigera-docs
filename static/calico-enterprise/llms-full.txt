@@ -3712,7 +3712,7 @@ This guide describes how to install Calico Enterprise on a Charmed Kubernetes cl
 - A [compatible Charmed Kubernetes bundle](https://github.com/charmed-kubernetes/bundle/tree/main/releases) configured without a CNI
 - A [Tigera license key and credentials](https://docs.tigera.io/calico-enterprise/latest/getting-started/install-on-clusters/calico-enterprise)
 - [Install kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/) on your workstation
-- [Install juju](https://juju.is/docs/juju/install-juju) on your workstation (if managing the cluster directly)
+- [Install juju](https://documentation.ubuntu.com/juju/latest/howto/manage-juju/) on your workstation (if managing the cluster directly)
 
 ## Prepare a compatible cluster for Calico Enterprise using a modified bundle file[​](#prepare-a-compatible-cluster-for-calico-enterprise-using-a-modified-bundle-file)
 
@@ -6609,6 +6609,10 @@ Due to the large number of distributions and kernel version out there, it’s ha
 
 [Use custom TLS certificates for non-cluster Calico Node and Typha](https://docs.tigera.io/calico-enterprise/latest/getting-started/bare-metal/typha-node-tls)
 
+## [📄️<!-- --> <!-- -->Troubleshoot non-cluster hosts and VMs setup](https://docs.tigera.io/calico-enterprise/latest/getting-started/bare-metal/troubleshoot)
+
+[Troubleshoot non-cluster hosts and VMs setup](https://docs.tigera.io/calico-enterprise/latest/getting-started/bare-metal/troubleshoot)
+
 ### Install Calico on non-cluster hosts and VMs
 
 ## Big picture[​](#big-picture)
@@ -6789,6 +6793,110 @@ On each non-cluster host or VM:
 
 1. Remove any existing certificates and private keys from `/etc/calico/calico-node`.
 2. Restart the Calico Node service. The service will automatically retrieve and install the BYO certificates and private keys from the cluster.
+
+### Troubleshoot non-cluster hosts and VMs setup
+
+This document provides guidance for troubleshooting Calico running on hosts and VMs outside of a cluster.
+
+## Useful commands[​](#useful-commands)
+
+These commands can help you collect logs and monitor system activities during troubleshooting.
+
+### On non-cluster hosts or VMs[​](#on-non-cluster-hosts-or-vms)
+
+```bash
+journalctl -xue calico-node.service -f
+journalctl -xue calico-fluent-bit.service -f
+```
+
+### On the cluster side[​](#on-the-cluster-side)
+
+```bash
+kubectl logs -n calico-system -l k8s-app=calico-typha-noncluster-host
+kubectl logs -n tigera-manager -l k8s-app=tigera-manager -c tigera-voltron
+```
+
+You can monitor CertificateSigningRequests (CSR) by running:
+
+```bash
+kubectl get certificatesigningrequest -w
+```
+
+Monitoring CSRs is useful for debugging certificates used for Calico Node and Typha mutual TLS (mTLS) communication. The automatic CSR approval and signing flow can fail in several ways. For example:
+
+- The CSR request might not be created or submitted correctly.
+- The Tigera Operator CSR controller might not process it.
+- The Tigera Operator signer might reject the request due to invalid fields or missing permission.
+
+When such failure occur, the CSR status object contains detailed condition and error messages that help identify the root cause.
+
+## Common problems[​](#common-problems)
+
+### No internet connection after installing the Calico Node package[​](#no-internet-connection-after-installing-the-calico-node-package)
+
+By default, Calico Enterprise blocks all traffic to and from host interfaces. You can use a profile with host endpoints to modify default behavior. Apply the built-in profile `projectcalico-default-allow`, which allows all ingress and egress traffic. Host endpoints that use this profile will have *allow-all* behavior instead of *deny-all* when no network policy is applied.
+
+Example `HostEndpoint` with the `projectcalico-default-allow` profile:
+
+```yaml
+apiVersion: projectcalico.org/v3
+kind: HostEndpoint
+metadata:
+ name: <endpoint-name>
+spec:
+ interfaceName: <interface-name>
+ node: <node-hostname>
+ expectedIPs: ["<list-of-expected-ips>"]
+ profiles:
+ - projectcalico-default-allow
+```
+
+### Certificate signed by unknown authority[​](#certificate-signed-by-unknown-authority)
+
+If the certificate presented by the Kubernetes API server or Tigera Manager endpoint is not signed by a trusted Certificate Authority (CA), add the correct CA certificate to the system trust store. Alternatively, for the Calico fluent-bit log forwarder, you can temporarily disable TLS verifications by setting:
+
+```conf
+[OUTPUT]
+ ...
+ tls.verify Off
+ ...
+```
+
+in the configuration file `/etc/calico/calico-fluent-bit/calico-fluent-bit.conf`.
+
+> **SECONDARY:** Disabling TLS verification should only be used for testing or troubleshooting.
+
+### No object can be associated with CSR error[​](#no-object-can-be-associated-with-csr-error)
+
+If a CSR is denied with the following error:
+
+```text
+invalid: no object can be associated with CSR node-certs-noncluster-host:<hostname>
+```
+
+verify the following:
+
+- A corresponding host endpoint resource exists for the non-cluster host or VM.
+- The `spec.node` field in the host endpoint resource matches the non-cluster host name exactly.
+
+### Peer certificate does not have required CN[​](#peer-certificate-does-not-have-required-cn)
+
+If the non-cluster host fails to connect to the dedicated Typha deployment, check that the certificate Common Name (CN) values are consistent on both sides.
+
+On the non-cluster host or VM under the `/etc/calico/calico-node` folder:
+
+- In `calico-node.conf`, verify the `TyphaCN` value matches the remote Typha server certificate CN, or
+- In `calico-node.env`, verify the `FELIX_TYPHACN` value matches the remote Typha server certificate CN.
+
+On the cluster side (`calico-system/calico-typha-noncluster-host` deployment):
+
+- The `TYPHA_CLIENTCN` environment variable must match the CN used in the non-cluster node certificate.
+
+### Certificate is not renewed or updated[​](#certificate-is-not-renewed-or-updated)
+
+The `calico-noncluster-host-init` process runs before the main `calico-node` service is responsible for renewing certificates that are expired or near expiry. Certificates are renewed automatically within 90 days of expiry.
+
+If you need to force immediate renewal, manually delete the existing certificate (`calico-node.crt`) and private key (`calico-node.key`) under the `/etc/calico/calico-node` folder and restart the service.
 
 ### Upgrade
 
@@ -14554,6 +14662,10 @@ Kubernetes uses IPAM plugins to allocate and manage IP addresses assigned to pod
 The **calico-ipam** plugin uses Calico Enterprise’s IP pool resource to control how IP addresses are allocated to pods within the cluster. This is the default plugin used by most Calico Enterprise installations.
 
 By default, Calico Enterprise uses a single IP pool for the entire Kubernetes pod CIDR, but you can divide the pod CIDR into several pools. You can assign separate IP pools to particular selections of **nodes**, or to teams, users, or applications within a cluster using **namespaces**.
+
+> **SUCCESS:** Because Calico IPAM does not use the Kubernetes node CIDR allocations (`Node.spec.podCIDR`), you can set `--allocate-node-cidrs=false` on the kube-controller-manager. This prevents Kubernetes from allocating unused node CIDRs and avoids `CIDRNotAvailable` events on nodes.
+>
+> If you bootstrapped your cluster with kubeadm and passed `--pod-network-cidr`, kubeadm enables node CIDR allocation automatically. See the [Kubernetes documentation](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-reconfigure/) for instructions on reconfiguring the controller manager after cluster creation.
 
 You can control which pools Calico Enterprise uses for each pod using
 
@@ -25605,7 +25717,6 @@ Get visibility into the network activity at the HostEndpoint level using Calico 
 **Limitations**
 
 - HostEndpoint reporting is only supported on Kubernetes nodes.
-- Flow logs on ApplyOnForward policies are currently not supported. As a result, a policy blocking traffic at the host level from forwarding to a workload endpoint would not result in a flow log from the host endpoint.
 
 ## How to[​](#how-to)
 
@@ -35211,7 +35322,7 @@ Yes. The license indicator in the web console (top right banner) turns red when 
 
 ### What happens when a license expires or is invalid?[​](#what-happens-when-a-license-expires-or-is-invalid)
 
-> **WARNING:** Although users can still log in to the web console, your deployment is no longer operational. All policy enforcement stops, except for policies in the default tier. In most cases, you will experience broken connectivity (depending on your policies in the default tier). Calico Enterprise stops reporting flow logs, DNS logs, and Calico Enterprise metrics, which affects other UI elements like Service Graph and dashboards. Although some elements may appear to work, actions are not saved, and you should regard your deployment as non-functional. We recommend that you proactively manage your license to avoid disruption.
+> **WARNING:** Calico Enterprise stops reporting flow logs, DNS logs, and Calico Enterprise metrics, which affects other UI elements like Service Graph and dashboards. Although some elements in the UI may appear to work, actions are not saved. We recommend that you proactively manage your license to avoid disruption.
 
 ### Do licenses cover free upgrades in Calico Enterprise?[​](#do-licenses-cover-free-upgrades-in-calico-enterprise)
 
@@ -36838,7 +36949,7 @@ Yes. The license indicator in the web console (top right banner) turns red when 
 
 ### What happens when a license expires or is invalid?[​](#what-happens-when-a-license-expires-or-is-invalid)
 
-> **WARNING:** Although users can still log in to the web console, your deployment is no longer operational. All policy enforcement stops, except for policies in the default tier. In most cases, you will experience broken connectivity (depending on your policies in the default tier). Calico Enterprise stops reporting flow logs, DNS logs, and Calico Enterprise metrics, which affects other UI elements like Service Graph and dashboards. Although some elements may appear to work, actions are not saved, and you should regard your deployment as non-functional. We recommend that you proactively manage your license to avoid disruption.
+> **WARNING:** Calico Enterprise stops reporting flow logs, DNS logs, and Calico Enterprise metrics, which affects other UI elements like Service Graph and dashboards. Although some elements in the UI may appear to work, actions are not saved. We recommend that you proactively manage your license to avoid disruption.
 
 ### Do licenses cover free upgrades in Calico Enterprise?[​](#do-licenses-cover-free-upgrades-in-calico-enterprise)
 
@@ -39592,7 +39703,7 @@ APIs, CLI, architecture and design, and FAQ.
 
 ##### [Attribution](https://docs.tigera.io/calico-enterprise/latest/reference/attribution)
 
-[Attribution report](https://docs.tigera.io/calico-enterprise/latest/reference/attribution)
+[Third-party license attribution report for Calico Enterprise](https://docs.tigera.io/calico-enterprise/latest/reference/attribution)
 
 ##### [Component versions](https://docs.tigera.io/calico-enterprise/latest/reference/component-versions)
 
@@ -65672,687 +65783,9 @@ Then you should observe that the new Calico Enterprise policy is enforced for ne
 
 ### Attribution
 
-## Calico Enterprise attribution report[​](#calico-enterprise-attribution-report)
+[FOSSA Attribution Report - Calico Enterprise 3.22](https://ce-3-22-attribution-report.s3.amazonaws.com/attribution-report.html)
 
-24 Feb 2021
-
-Calico Enterprise incorporates various open source software. The following open source components and their respective licenses used in the product are provided for your informational purposes. In the table below, you can look at the details of each project and license associated with it.
-
-| Project                                                                        | Artifact Name                                                                                   | LICENSE              |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | -------------------- |
-| abbrev                                                                         | abbrev-1.1.1.tgz                                                                                | ISC                  |
-| algoliasearch                                                                  | algoliasearch.umd-4.2.0.js                                                                      | MIT                  |
-| ansi-regex                                                                     | ansi-regex-2.1.1.tgz                                                                            | MIT                  |
-| ansi-styles                                                                    | ansi-styles-3.2.1.tgz                                                                           | MIT                  |
-| @types/anymatch                                                                | anymatch-1.3.1.tgz                                                                              | MIT                  |
-| app-policy                                                                     | app-policy-v3.16.6                                                                              | Tigera Proprietary   |
-| argparse                                                                       | argparse-1.0.9.tgz                                                                              | MIT                  |
-| arr-diff                                                                       | arr-diff-4.0.0.tgz                                                                              | MIT                  |
-| arr-flatten                                                                    | arr-flatten-1.1.0.tgz                                                                           | MIT                  |
-| arr-union                                                                      | arr-union-3.1.0.tgz                                                                             | MIT                  |
-| array-unique                                                                   | array-unique-0.3.2.tgz                                                                          | MIT                  |
-| asap                                                                           | asap-2.0.6.tgz                                                                                  | MIT                  |
-| assign-symbols                                                                 | assign-symbols-1.0.0.tgz                                                                        | MIT                  |
-| atob                                                                           | atob-2.1.2.tgz                                                                                  | Apache 2.0           |
-| atomicwrites                                                                   | atomicwrites-1.4.0-py2.py3-none-any.whl                                                         | MIT                  |
-| attrs                                                                          | attrs-20.3.0-py2.py3-none-any.whl                                                               | MIT                  |
-| avsdf-base                                                                     | avsdf-base-1.0.0.tgz                                                                            | MIT                  |
-| babel-standalone                                                               | babel-6.26.0.min.js                                                                             | MIT                  |
-| babel-runtime                                                                  | babel-runtime-6.26.0.tgz                                                                        | MIT                  |
-| backports.functools-lru-cache                                                  | backports.functools\_lru\_cache-1.6.1-py2.py3-none-any.whl                                      | MIT                  |
-| balanced-match                                                                 | balanced-match-0.4.2.tgz                                                                        | MIT                  |
-| balanced-match                                                                 | balanced-match-1.0.0.tgz                                                                        | MIT                  |
-| base                                                                           | base-0.11.2.tgz                                                                                 | MIT                  |
-| beautifulsoup4                                                                 | beautifulsoup4-4.9.3-py2-none-any.whl                                                           | MIT                  |
-| big.js                                                                         | big.js-5.2.2.tgz                                                                                | MIT                  |
-| boolbase                                                                       | boolbase-1.0.0.tgz                                                                              | ISC                  |
-| twitter-bootstrap                                                              | bootstrap-3.3.7.min.js                                                                          | MIT                  |
-| bootstrap                                                                      | bootstrap-3.4.1.tgz                                                                             | MIT                  |
-| brace-expansion                                                                | brace-expansion-1.1.11.tgz                                                                      | MIT                  |
-| braces                                                                         | braces-2.3.2.tgz                                                                                | MIT                  |
-| bs4                                                                            | bs4-0.0.1.tar.gz                                                                                | MIT                  |
-| buffer-from                                                                    | buffer-from-1.1.1.tgz                                                                           | MIT                  |
-| cache-base                                                                     | cache-base-1.0.1.tgz                                                                            | MIT                  |
-| cachetools                                                                     | cachetools-3.1.1-py2.py3-none-any.whl                                                           | MIT                  |
-| projectcalico                                                                  | calico-v3.17.1                                                                                  | Apache 2.0           |
-| projectcalico                                                                  | calicoctl-v3.17.1                                                                               | Apache 2.0           |
-| camel-case                                                                     | camel-case-4.1.1.tgz                                                                            | MIT                  |
-| certifi                                                                        | certifi-2020.12.5-py2.py3-none-any.whl                                                          | Mozilla 2.0          |
-| chain-function                                                                 | chain-function-1.0.0.tgz                                                                        | MIT                  |
-| chalk                                                                          | chalk-2.4.2.tgz                                                                                 | MIT                  |
-| chardet                                                                        | chardet-3.0.4-py2.py3-none-any.whl                                                              | LGPL 3.0             |
-| chardet                                                                        | chardet-4.0.0-py2.py3-none-any.whl                                                              | LGPL 3.0             |
-| chevrotain                                                                     | chevrotain-6.5.0.tgz                                                                            | Apache 2.0           |
-| cidr-regex                                                                     | cidr-regex-2.0.10.tgz                                                                           | BSD 2                |
-| class-transformer                                                              | class-transformer-0.3.1.tgz                                                                     | MIT                  |
-| class-utils                                                                    | class-utils-0.3.6.tgz                                                                           | MIT                  |
-| class-validator                                                                | class-validator-0.9.1.tgz                                                                       | MIT                  |
-| classnames                                                                     | classnames-2.2.5.tgz                                                                            | MIT                  |
-| classnames                                                                     | classnames-2.2.6.tgz                                                                            | MIT                  |
-| clean-css                                                                      | clean-css-4.2.3.tgz                                                                             | MIT                  |
-| clipboard.js                                                                   | clipboard-2.0.0.min.js                                                                          | MIT                  |
-| cni-plugin                                                                     | cni-plugin-v3.16.6                                                                              | Tigera Proprietary   |
-| @babel/code-frame                                                              | code-frame-7.10.1.tgz                                                                           | MIT                  |
-| codemirror                                                                     | codemirror-5.57.0.js                                                                            | MIT                  |
-| codemirror                                                                     | codemirror-5.57.0.tgz                                                                           | MIT                  |
-| collection-visit                                                               | collection-visit-1.0.0.tgz                                                                      | MIT                  |
-| color-convert                                                                  | color-convert-1.9.3.tgz                                                                         | MIT                  |
-| color-name                                                                     | color-name-1.1.3.tgz                                                                            | MIT                  |
-| commander                                                                      | commander-2.13.0.tgz                                                                            | MIT                  |
-| commander                                                                      | commander-2.20.3.tgz                                                                            | MIT                  |
-| commander                                                                      | commander-4.1.1.tgz                                                                             | MIT                  |
-| component-emitter                                                              | component-emitter-1.3.0.tgz                                                                     | MIT                  |
-| concat-map                                                                     | concat-map-0.0.1.tgz                                                                            | MIT                  |
-| configparser                                                                   | configparser-4.0.2-py2.py3-none-any.whl                                                         | MIT                  |
-| connected-react-router                                                         | connected-react-router-6.5.2.tgz                                                                | MIT                  |
-| contextlib2                                                                    | contextlib2-0.6.0.post1-py2.py3-none-any.whl                                                    | Python 2.0           |
-| copy-descriptor                                                                | copy-descriptor-0.1.1.tgz                                                                       | MIT                  |
-| @popperjs/core                                                                 | core-2.4.4.tgz                                                                                  | MIT                  |
-| core-js                                                                        | core-js-1.2.7.tgz                                                                               | MIT                  |
-| core-js                                                                        | core-js-2.5.1.tgz                                                                               | MIT                  |
-| core-js                                                                        | core-js-2.5.7.tgz                                                                               | MIT                  |
-| core-js                                                                        | core-js-3.6.5.tgz                                                                               | MIT                  |
-| cose-base                                                                      | cose-base-1.0.3.tgz                                                                             | MIT                  |
-| create-react-class                                                             | create-react-class-15.6.2.tgz                                                                   | MIT                  |
-| css-box-model                                                                  | css-box-model-1.1.1.tgz                                                                         | MIT                  |
-| css-select                                                                     | css-select-1.2.0.tgz                                                                            | BSD 2                |
-| css-what                                                                       | css-what-2.1.3.tgz                                                                              | BSD 2                |
-| @ungap/custom-elements                                                         | custom-elements-0.1.12.tgz                                                                      | ISC                  |
-| cytoscape                                                                      | cytoscape-3.15.2.tgz                                                                            | MIT                  |
-| cytoscape                                                                      | cytoscape-3.18.0.min.js                                                                         | MIT                  |
-| cytoscape-avsdf                                                                | cytoscape-avsdf-1.0.0.tgz                                                                       | MIT                  |
-| cytoscape-cise                                                                 | cytoscape-cise-1.0.0.tgz                                                                        | MIT                  |
-| cytoscape-context-menus                                                        | cytoscape-context-menus-4.0.0.tgz                                                               | MIT                  |
-| cytoscape-cose-bilkent                                                         | cytoscape-cose-bilkent-4.1.0.tgz                                                                | MIT                  |
-| cytoscape-dagre-cluster-fix                                                    | cytoscape-dagre-cluster-fix-2.2.5.tgz                                                           | MIT                  |
-| cytoscape-expand-collapse                                                      | cytoscape-expand-collapse-4.0.0.tgz                                                             | MIT                  |
-| cytoscape-fcose                                                                | cytoscape-fcose-1.2.3.tgz                                                                       | MIT                  |
-| cytoscape-layers                                                               | cytoscape-layers-2.1.0.tgz                                                                      | MIT                  |
-| cytoscape-navigator                                                            | cytoscape-navigator-2.0.1.tgz                                                                   | MIT                  |
-| cytoscape-popper                                                               | cytoscape-popper-1.0.7.js                                                                       | MIT                  |
-| cytoscape-popper                                                               | cytoscape-popper-1.0.7.tgz                                                                      | MIT                  |
-| d3                                                                             | d3-5.5.0.tgz                                                                                    | BSD 3                |
-| d3-array                                                                       | d3-array-1.2.1.tgz                                                                              | BSD 3                |
-| d3-array                                                                       | d3-array-1.2.4.tgz                                                                              | BSD 3                |
-| d3-axis                                                                        | d3-axis-1.0.8.tgz                                                                               | BSD 3                |
-| d3-brush                                                                       | d3-brush-1.0.4.tgz                                                                              | BSD 3                |
-| d3-chord                                                                       | d3-chord-1.0.4.tgz                                                                              | BSD 3                |
-| d3-collection                                                                  | d3-collection-1.0.4.tgz                                                                         | BSD 3                |
-| d3-collection                                                                  | d3-collection-1.0.7.tgz                                                                         | BSD 3                |
-| d3-color                                                                       | d3-color-1.0.3.tgz                                                                              | BSD 3                |
-| d3-contour                                                                     | d3-contour-1.2.0.tgz                                                                            | BSD 3                |
-| d3-dispatch                                                                    | d3-dispatch-1.0.3.tgz                                                                           | BSD 3                |
-| d3-drag                                                                        | d3-drag-1.2.1.tgz                                                                               | BSD 3                |
-| d3-dsv                                                                         | d3-dsv-1.0.8.tgz                                                                                | BSD 3                |
-| d3-ease                                                                        | d3-ease-1.0.3.tgz                                                                               | BSD 3                |
-| d3-fetch                                                                       | d3-fetch-1.1.0.tgz                                                                              | BSD 3                |
-| d3-force                                                                       | d3-force-1.1.0.tgz                                                                              | BSD 3                |
-| d3-format                                                                      | d3-format-1.2.2.tgz                                                                             | BSD 3                |
-| d3-geo                                                                         | d3-geo-1.10.0.tgz                                                                               | BSD 3                |
-| d3-hierarchy                                                                   | d3-hierarchy-1.1.6.tgz                                                                          | BSD 3                |
-| d3-interpolate                                                                 | d3-interpolate-1.1.6.tgz                                                                        | BSD 3                |
-| d3-interpolate                                                                 | d3-interpolate-1.3.2.tgz                                                                        | BSD 3                |
-| d3-path                                                                        | d3-path-1.0.5.tgz                                                                               | BSD 3                |
-| d3-polygon                                                                     | d3-polygon-1.0.3.tgz                                                                            | BSD 3                |
-| d3-quadtree                                                                    | d3-quadtree-1.0.3.tgz                                                                           | BSD 3                |
-| d3-random                                                                      | d3-random-1.1.0.tgz                                                                             | BSD 3                |
-| d3-sankey-circular                                                             | d3-sankey-circular-0.34.0.tgz                                                                   | MIT                  |
-| d3-scale                                                                       | d3-scale-2.0.0.tgz                                                                              | BSD 3                |
-| d3-scale                                                                       | d3-scale-2.1.2.tgz                                                                              | BSD 3                |
-| d3-scale-chromatic                                                             | d3-scale-chromatic-1.3.0.tgz                                                                    | BSD 3                |
-| d3-selection                                                                   | d3-selection-1.3.0.tgz                                                                          | BSD 3                |
-| d3-shape                                                                       | d3-shape-1.2.0.tgz                                                                              | BSD 3                |
-| d3-shape                                                                       | d3-shape-1.2.3.tgz                                                                              | BSD 3                |
-| d3-shape                                                                       | d3-shape-1.3.7.tgz                                                                              | BSD 3                |
-| d3-time                                                                        | d3-time-1.0.8.tgz                                                                               | BSD 3                |
-| d3-time-format                                                                 | d3-time-format-2.1.1.tgz                                                                        | BSD 3                |
-| d3-timer                                                                       | d3-timer-1.0.7.tgz                                                                              | BSD 3                |
-| d3-transition                                                                  | d3-transition-1.1.1.tgz                                                                         | BSD 3                |
-| d3-voronoi                                                                     | d3-voronoi-1.1.2.tgz                                                                            | BSD 3                |
-| d3-zoom                                                                        | d3-zoom-1.7.1.tgz                                                                               | BSD 3                |
-| dagre                                                                          | dagre-0.7.4.js                                                                                  | MIT                  |
-| dagre-cluster-fix                                                              | dagre-cluster-fix-0.9.3.tgz                                                                     | MIT                  |
-| debug                                                                          | debug-2.6.9.tgz                                                                                 | MIT                  |
-| decimal.js-light                                                               | decimal.js-light-2.5.0.tgz                                                                      | MIT                  |
-| decode-uri-component                                                           | decode-uri-component-0.2.0.tgz                                                                  | MIT                  |
-| deepdiff                                                                       | deepdiff-3.3.0-py2-none-any.whl                                                                 | MIT                  |
-| deepmerge                                                                      | deepmerge-2.1.1.tgz                                                                             | MIT                  |
-| define-properties                                                              | define-properties-1.1.2.tgz                                                                     | MIT                  |
-| define-properties                                                              | define-properties-1.1.3.tgz                                                                     | MIT                  |
-| define-property                                                                | define-property-0.2.5.tgz                                                                       | MIT                  |
-| define-property                                                                | define-property-1.0.0.tgz                                                                       | MIT                  |
-| define-property                                                                | define-property-2.0.2.tgz                                                                       | MIT                  |
-| diff                                                                           | diff-3.5.0.tgz                                                                                  | BSD 3                |
-| diff2html                                                                      | diff2html-2.4.0.tgz                                                                             | MIT                  |
-| dom-converter                                                                  | dom-converter-0.2.0.tgz                                                                         | MIT                  |
-| dom-helpers                                                                    | dom-helpers-3.3.1.tgz                                                                           | MIT                  |
-| dom-helpers                                                                    | dom-helpers-3.4.0.tgz                                                                           | MIT                  |
-| dom-serializer                                                                 | dom-serializer-0.2.2.tgz                                                                        | MIT                  |
-| dom-walk                                                                       | dom-walk-0.1.2.tgz                                                                              | MIT                  |
-| domelementtype                                                                 | domelementtype-1.3.1.tgz                                                                        | BSD 2                |
-| domelementtype                                                                 | domelementtype-2.0.1.tgz                                                                        | BSD 2                |
-| domhandler                                                                     | domhandler-2.4.2.tgz                                                                            | BSD 2                |
-| domutils                                                                       | domutils-1.5.1.tgz                                                                              | BSD 2                |
-| domutils                                                                       | domutils-1.7.0.tgz                                                                              | BSD 2                |
-| dot-case                                                                       | dot-case-3.0.3.tgz                                                                              | MIT                  |
-| elasticsearch                                                                  | elasticsearch-6.8.1-py2.py3-none-any.whl                                                        | Apache 2.0           |
-| elementary-circuits-directed-graph                                             | elementary-circuits-directed-graph-1.2.0.tgz                                                    | MIT                  |
-| emojis-list                                                                    | emojis-list-3.0.0.tgz                                                                           | MIT                  |
-| encoding                                                                       | encoding-0.1.12.tgz                                                                             | MIT                  |
-| entities                                                                       | entities-1.1.2.tgz                                                                              | BSD 2                |
-| entities                                                                       | entities-2.0.3.tgz                                                                              | BSD 2                |
-| es-abstract                                                                    | es-abstract-1.17.5.tgz                                                                          | MIT                  |
-| es-to-primitive                                                                | es-to-primitive-1.2.1.tgz                                                                       | MIT                  |
-| es5-shim                                                                       | es5-shim-4.3.1.js                                                                               | MIT                  |
-| escape-string-regexp                                                           | escape-string-regexp-1.0.5.tgz                                                                  | MIT                  |
-| esprima                                                                        | esprima-4.0.0.tgz                                                                               | BSD 2                |
-| expand-brackets                                                                | expand-brackets-2.1.4.tgz                                                                       | MIT                  |
-| extend-shallow                                                                 | extend-shallow-2.0.1.tgz                                                                        | MIT                  |
-| extend-shallow                                                                 | extend-shallow-3.0.2.tgz                                                                        | MIT                  |
-| extglob                                                                        | extglob-2.0.4.tgz                                                                               | MIT                  |
-| fast-levenshtein                                                               | fast-levenshtein-2.0.6.tgz                                                                      | MIT                  |
-| fbjs                                                                           | fbjs-0.8.16.tgz                                                                                 | MIT                  |
-| felix                                                                          | felix-v3.17.2                                                                                   | Tigera Proprietary   |
-| file-saver                                                                     | file-saver-2.0.1.tgz                                                                            | MIT                  |
-| fill-range                                                                     | fill-range-4.0.0.tgz                                                                            | MIT                  |
-| @fortawesome/fontawesome-common-types                                          | fontawesome-common-types-0.2.32.tgz                                                             | MIT                  |
-| @fortawesome/fontawesome-svg-core                                              | fontawesome-svg-core-1.2.10.tgz                                                                 | MIT                  |
-| for-in                                                                         | for-in-1.0.2.tgz                                                                                | MIT                  |
-| foreach                                                                        | foreach-2.0.5.tgz                                                                               | MIT                  |
-| fork-ts-checker-webpack-plugin                                                 | fork-ts-checker-webpack-plugin-4.1.6.tgz                                                        | MIT                  |
-| formik                                                                         | formik-2.1.3.tgz                                                                                | MIT                  |
-| fragment-cache                                                                 | fragment-cache-0.2.1.tgz                                                                        | MIT                  |
-| @fortawesome/free-brands-svg-icons                                             | free-brands-svg-icons-5.6.1.tgz                                                                 | CC BY 4.0            |
-| @fortawesome/free-regular-svg-icons                                            | free-regular-svg-icons-5.15.1.tgz                                                               | CC BY 4.0            |
-| @fortawesome/free-solid-svg-icons                                              | free-solid-svg-icons-5.6.1.tgz                                                                  | CC BY 4.0            |
-| funcsigs                                                                       | funcsigs-1.0.2-py2.py3-none-any.whl                                                             | Apache 2.0           |
-| function-bind                                                                  | function-bind-1.1.1.tgz                                                                         | MIT                  |
-| get-value                                                                      | get-value-2.0.6.tgz                                                                             | MIT                  |
-| github.com/alecthomas/participle                                               | github.com/alecthomas/participle-v0.3.0                                                         | MIT                  |
-| github.com/apparentlymart/go-cidr/cidr                                         | github.com/apparentlymart/go-cidr/cidr-v1.0.1                                                   | MIT                  |
-| github.com/aquasecurity/kube-bench/check                                       | github.com/aquasecurity/kube-bench/check-v0.0.34                                                | Apache 2.0           |
-| github.com/araddon/dateparse                                                   | github.com/araddon/dateparse-262228af701ebf3932b8b8488da6781b9d585c88                           | MIT                  |
-| github.com/avast/retry-go                                                      | github.com/avast/retry-go-v2.2.0                                                                | MIT                  |
-| github.com/aws/aws-lambda-go/events                                            | github.com/aws/aws-lambda-go/events-v1.13.3                                                     | Apache 2.0           |
-| github.com/aws/aws-sdk-go/aws                                                  | github.com/aws/aws-sdk-go/aws-v1.25.8                                                           | Apache 2.0           |
-| github.com/bmizerany/pat                                                       | github.com/bmizerany/pat-6226ea591a40176dd3ff9cd8eff81ed6ca721a00                               | MIT                  |
-| github.com/bronze1man/gostrongswanvici                                         | github.com/bronze1man/gostrongswanvici-27d02f80ba4008de552efb746b3f6eaa7718b518                 | MIT                  |
-| github.com/buger/jsonparser                                                    | github.com/buger/jsonparser-v1.0.0                                                              | MIT                  |
-| github.com/burntsushi/toml                                                     | github.com/burntsushi/toml-v0.3.1                                                               | MIT                  |
-| github.com/caimeo/iniflags                                                     | github.com/caimeo/iniflags-ef4ae6c5cd79d20db0b18bc5ebd8657fac7260e5                             | BSD 2                |
-| github.com/cloudflare/cfssl/log                                                | github.com/cloudflare/cfssl/log-v1.4.1                                                          | BSD 2                |
-| github.com/containernetworking/cni/libcni                                      | github.com/containernetworking/cni/libcni-v0.8.0                                                | Apache 2.0           |
-| github.com/containernetworking/plugins/pkg/hns                                 | github.com/containernetworking/plugins/pkg/hns-v0.8.5                                           | Apache 2.0           |
-| github.com/coreos/go-oidc                                                      | github.com/coreos/go-oidc-v2.1.0                                                                | Apache 2.0           |
-| github.com/coreos/go-semver/semver                                             | github.com/coreos/go-semver/semver-v0.3.0                                                       | Apache 2.0           |
-| github.com/davecgh/go-spew/spew                                                | github.com/davecgh/go-spew/spew-v1.1.1                                                          | ISC                  |
-| github.com/docker/docker/api/types                                             | github.com/docker/docker/api/types-v1.13.1                                                      | Apache 2.0           |
-| github.com/docker/docker/client                                                | github.com/docker/docker/client-v1.13.1                                                         | Apache 2.0           |
-| github.com/docker/go-connections/nat                                           | github.com/docker/go-connections/nat-v0.4.0                                                     | Apache 2.0           |
-| github.com/docopt/docopt-go                                                    | github.com/docopt/docopt-go-ee0de3bc6815ee19d4a46c7eb90f829db0e014b1                            | MIT                  |
-| github.com/elastic/go-elasticsearch/v7                                         | github.com/elastic/go-elasticsearch/v7-v7.3.0                                                   | Apache 2.0           |
-| github.com/envoyproxy/data-plane-api/envoy/api/v2/core                         | github.com/envoyproxy/data-plane-api/envoy/api/v2/core-ffd420ef8a9ad148642236aa6d89e2855b41c821 | Apache 2.0           |
-| github.com/fsnotify/fsnotify                                                   | github.com/fsnotify/fsnotify-v1.4.9                                                             | BSD 3                |
-| github.com/gavv/monotime                                                       | github.com/gavv/monotime-30dba43534243e3484a34676a0f068d12b989f84                               | Apache 2.0           |
-| github.com/getlantern/deepcopy                                                 | github.com/getlantern/deepcopy-v1                                                               | Apache 2.0           |
-| github.com/ghodss/yaml                                                         | github.com/ghodss/yaml-v1.0.0                                                                   | BSD 3                |
-| github.com/go-ini/ini                                                          | github.com/go-ini/ini-v1.43.0                                                                   | Apache 2.0           |
-| github.com/go-logr/logr                                                        | github.com/go-logr/logr-v0.3.0                                                                  | Apache 2.0           |
-| github.com/go-openapi/spec                                                     | github.com/go-openapi/spec-v0.19.3                                                              | Apache 2.0           |
-| github.com/go-sql-driver/mysql                                                 | github.com/go-sql-driver/mysql-v1.4.1                                                           | Mozilla 2.0          |
-| github.com/gofrs/flock                                                         | github.com/gofrs/flock-v0.8.0                                                                   | BSD 3                |
-| github.com/gogo/googleapis/google/rpc                                          | github.com/gogo/googleapis/google/rpc-v1.2.0                                                    | Apache 2.0           |
-| github.com/gogo/protobuf/proto                                                 | github.com/gogo/protobuf/proto-v1.3.1                                                           | BSD 3                |
-| github.com/golang-collections/collections/stack                                | github.com/golang-collections/collections/stack-604e922904d35e97f98a774db7881f049cd8d970        | MIT                  |
-| github.com/google/go-cmp/cmp                                                   | github.com/google/go-cmp/cmp-v0.4.0                                                             | BSD 3                |
-| github.com/google/gofuzz                                                       | github.com/google/gofuzz-v1.1.0                                                                 | Apache 2.0           |
-| github.com/google/gopacket                                                     | github.com/google/gopacket-v1.1.18                                                              | BSD 3                |
-| github.com/google/netstack/tcpip/header                                        | github.com/google/netstack/tcpip/header-55fcc16cd0eb096d8418f7bc5162483c31a4e82b                | Apache 2.0           |
-| github.com/hashicorp/go-version                                                | github.com/hashicorp/go-version-v1.2.1                                                          | Mozilla 2.0          |
-| github.com/hashicorp/golang-lru                                                | github.com/hashicorp/golang-lru-v0.5.1                                                          | Mozilla 2.0          |
-| github.com/hashicorp/yamux                                                     | github.com/hashicorp/yamux-2f1d1f20f75d5404f53b9edf6b53ed5505508675                             | Mozilla 2.0          |
-| github.com/howeyc/fsnotify                                                     | github.com/howeyc/fsnotify-v0.9.0                                                               | BSD 3                |
-| github.com/hpcloud/tail                                                        | github.com/hpcloud/tail-v1.0.0                                                                  | MIT                  |
-| github.com/ishidawataru/sctp                                                   | github.com/ishidawataru/sctp-00ab2ac2db07a138417639ef3f39672c65dbb9a0                           | BSD 3                |
-| github.com/jarcoal/httpmock                                                    | github.com/jarcoal/httpmock-v1.0.5                                                              | MIT                  |
-| github.com/jinzhu/copier                                                       | github.com/jinzhu/copier-v0.1.0                                                                 | MIT                  |
-| github.com/jmespath/go-jmespath                                                | github.com/jmespath/go-jmespath-0.3.0                                                           | Apache 2.0           |
-| github.com/joho/godotenv                                                       | github.com/joho/godotenv-v1.3.0                                                                 | MIT                  |
-| github.com/jpillora/backoff                                                    | github.com/jpillora/backoff-v1.0.0                                                              | MIT                  |
-| github.com/json-iterator/go                                                    | github.com/json-iterator/go-v1.1.10                                                             | MIT                  |
-| github.com/juju/clock                                                          | github.com/juju/clock-9c5c9712527c7986f012361e7d13756b4d99543d                                  | LGPL 3.0             |
-| github.com/juju/errors                                                         | github.com/juju/errors-3fe23663418fc1d724868c84f21b7519bbac7441                                 | LGPL 3.0             |
-| github.com/juju/mutex                                                          | github.com/juju/mutex-d21b13acf4bfd8a8b0482a3a78e44d98880b40d3                                  | LGPL 3.0             |
-| github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils | github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils-v1.1.0           | Apache 2.0           |
-| github.com/kardianos/osext                                                     | github.com/kardianos/osext-2bc1f35cddc0cc527b4bc3dce8578fc2a6c11384                             | BSD 3                |
-| github.com/kelseyhightower/envconfig                                           | github.com/kelseyhightower/envconfig-v1.4.0                                                     | MIT                  |
-| github.com/kelseyhightower/memkv                                               | github.com/kelseyhightower/memkv-v0.1.1                                                         | MIT                  |
-| github.com/konsorten/go-windows-terminal-sequences                             | github.com/konsorten/go-windows-terminal-sequences-v1.0.1                                       | MIT                  |
-| github.com/lestrrat-go/file-rotatelogs                                         | github.com/lestrrat-go/file-rotatelogs-v2.4.0                                                   | MIT                  |
-| github.com/libp2p/go-reuseport                                                 | github.com/libp2p/go-reuseport-v0.0.1                                                           | ISC                  |
-| github.com/lithammer/dedent                                                    | github.com/lithammer/dedent-v1.1.0                                                              | MIT                  |
-| github.com/mailru/easyjson                                                     | github.com/mailru/easyjson-v0.7.0                                                               | MIT                  |
-| github.com/masterminds/sprig                                                   | github.com/masterminds/sprig-v2.19.0                                                            | MIT                  |
-| github.com/mcuadros/go-version                                                 | github.com/mcuadros/go-version-92cdf37c5b7579ebaf7a036da94b40995972088d                         | MIT                  |
-| github.com/microsoft/hcsshim                                                   | github.com/microsoft/hcsshim-v0.8.6                                                             | MIT                  |
-| github.com/mipearson/rfw                                                       | github.com/mipearson/rfw-6f0a6f3266ba1058df9ef0c94cda1cecd2e62852                               | MIT                  |
-| github.com/mitchellh/go-homedir                                                | github.com/mitchellh/go-homedir-v1.1.0                                                          | MIT                  |
-| github.com/modern-go/concurrent                                                | github.com/modern-go/concurrent-1.0.3                                                           | Apache 2.0           |
-| github.com/modern-go/reflect2                                                  | github.com/modern-go/reflect2-v1.0.1                                                            | Apache 2.0           |
-| github.com/natefinch/atomic                                                    | github.com/natefinch/atomic-a62ce929ffcc871a51e98c6eba7b20321e3ed62d                            | MIT                  |
-| github.com/nmrshll/go-cp                                                       | github.com/nmrshll/go-cp-61436d3b7cfa1bc1e8e455c35d8f60b8e51ccc2e                               | MIT                  |
-| github.com/nxadm/tail                                                          | github.com/nxadm/tail-v1.4.4                                                                    | MIT                  |
-| github.com/olekukonko/tablewriter                                              | github.com/olekukonko/tablewriter-v0.0.2                                                        | MIT                  |
-| github.com/olivere/elastic/v7                                                  | github.com/olivere/elastic/v7-v7.0.6                                                            | MIT                  |
-| github.com/onsi/ginkgo                                                         | github.com/onsi/ginkgo-v1.15.0                                                                  | MIT                  |
-| github.com/onsi/gomega                                                         | github.com/onsi/gomega-v1.7.0                                                                   | MIT                  |
-| github.com/openshift/api/config/v1                                             | github.com/openshift/api/config/v1-d0822898eabb929c40c5146116252477abab8d18                     | Apache 2.0           |
-| github.com/openshift/library-go/pkg/crypto                                     | github.com/openshift/library-go/pkg/crypto-9350cd67a9110bcaf9a85d391fa264afbbff1342             | Apache 2.0           |
-| github.com/osrg/gobgp/client                                                   | github.com/osrg/gobgp/client-v1.22                                                              | Apache 2.0           |
-| github.com/paloaltonetworks/pango                                              | github.com/paloaltonetworks/pango-v0.1.1                                                        | ISC                  |
-| github.com/patrickmn/go-cache                                                  | github.com/patrickmn/go-cache-v2.1.0                                                            | MIT                  |
-| github.com/pkg/errors                                                          | github.com/pkg/errors-v0.8.1                                                                    | BSD 2                |
-| github.com/projectcalico/cni-plugin                                            | github.com/projectcalico/cni-plugin                                                             | Apache 2.0           |
-| github.com/projectcalico/felix                                                 | github.com/projectcalico/felix                                                                  | Apache 2.0           |
-| github.com/projectcalico/go-json                                               | github.com/projectcalico/go-json/json-6219dc7339ba20ee4c57df0a8baac62317d19cb1                  | BSD 2                |
-| github.com/projectcalico/go-yaml-wrapper                                       | github.com/projectcalico/go-yaml-wrapper-090425220c545f6d179db17af395f5aac30b6926               | BSD 3                |
-| kube-controllers                                                               | kube-controllers                                                                                | Tigera Proprietary   |
-| github.com/projectcalico/libcalico-go                                          | github.com/projectcalico/libcalico-go/lib                                                       | Apache 2.0           |
-| github.com/projectcalico/pod2daemon                                            | github.com/projectcalico/pod2daemon                                                             | Apache 2.0           |
-| typha                                                                          | typha                                                                                           | Tigera Proprietary   |
-| github.com/prometheus/client\_golang/                                          | github.com/prometheus/client\_golang/prometheus-v1.7.1                                          | Apache 2.0           |
-| github.com/rakelkar/gonetsh/netsh                                              | github.com/rakelkar/gonetsh/netsh-e5c5ffe4bdf04bc060fc45ff4aca2349f51c94a7                      | Apache 2.0           |
-| github.com/robfig/cron                                                         | github.com/robfig/cron-v1.2.0                                                                   | MIT                  |
-| github.com/satori/go.uuid                                                      | github.com/satori/go.uuid-v1.2.0                                                                | MIT                  |
-| github.com/shirou/gopsutil/process                                             | github.com/shirou/gopsutil/process-v2.19.03                                                     | BSD 3                |
-| github.com/sirupsen/logrus                                                     | github.com/sirupsen/logrus-v1.4.2                                                               | MIT                  |
-| github.com/sirupsen/logrus                                                     | github.com/sirupsen/logrus-v1.6.0                                                               | MIT                  |
-| github.com/spf13/cobra                                                         | github.com/spf13/cobra-v0.0.3                                                                   | Apache 2.0           |
-| github.com/spf13/cobra                                                         | github.com/spf13/cobra-v1.0.0                                                                   | Apache 2.0           |
-| github.com/spf13/pflag                                                         | github.com/spf13/pflag-v1.0.5                                                                   | BSD 3                |
-| github.com/spf13/viper                                                         | github.com/spf13/viper-v1.6.1                                                                   | MIT                  |
-| github.com/stretchr/testify                                                    | github.com/stretchr/testify/mock-v1.4.0                                                         | MIT                  |
-| github.com/termie/go-shutil                                                    | github.com/termie/go-shutil-bcacb06fecaeec8dc42af03c87c6949f4a05c74c                            | MIT                  |
-| github.com/tigera/api                                                          | github.com/tigera/api/                                                                          | Apache 2.0           |
-| github.com/vishvananda/netlink                                                 | github.com/vishvananda/netlink-v1.1.0                                                           | Apache 2.0           |
-| github.com/willf/bitset                                                        | github.com/willf/bitset-v1.1.11                                                                 | BSD 3                |
-| github.com/workiva/go-datastructures/trie/ctrie                                | github.com/workiva/go-datastructures/trie/ctrie-v1.0.50                                         | Apache 2.0           |
-| github.com/x-cray/logrus-prefixed-formatter                                    | github.com/x-cray/logrus-prefixed-formatter-v0.5.2                                              | MIT                  |
-| github.com/yalp/jsonpath                                                       | github.com/yalp/jsonpath-5cc68e5049a040829faef3a44c00ec4332f6dec7                               | BSD 3                |
-| global                                                                         | global-4.4.0.tgz                                                                                | MIT                  |
-| go.etcd.io/etcd/                                                               | go.etcd.io/etcd/client-v0.5.0-alpha.5.0.20201125193152-8a03d2e9614b                             | Apache 2.0           |
-| go.uber.org/zap                                                                | go.uber.org/zap-v1.15.0                                                                         | MIT                  |
-| golang.org/x/crypto                                                            | golang.org/x/crypto/                                                                            | BSD 3                |
-| golang.org/x/net                                                               | golang.org/x/net/                                                                               | BSD 3                |
-| golang.org/x/sync/                                                             | golang.org/x/sync/                                                                              | BSD 3                |
-| golang.org/x/sys                                                               | golang.org/x/sys                                                                                | BSD 3                |
-| github.com/golang/text                                                         | golang.org/x/text                                                                               | Golang BSD + Patents |
-| golang.zx2c4.com/wireguard/                                                    | golang.zx2c4.com/wireguard/                                                                     | MIT                  |
-| google-libphonenumber                                                          | google-libphonenumber-3.2.2.tgz                                                                 | Apache 2.0           |
-| google.golang.org/grpc                                                         | google.golang.org/grpc-v1.27.0                                                                  | Apache 2.0           |
-| google-auth                                                                    | google\_auth-1.26.1-py2.py3-none-any.whl                                                        | Apache 2.0           |
-| gopkg.in/fsnotify/fsnotify.v1                                                  | gopkg.in/fsnotify/fsnotify.v1-v1.4.7                                                            | BSD 3                |
-| gopkg.in/go-playground/validator.v9                                            | gopkg.in/go-playground/validator.v9-v9.30.2                                                     | MIT                  |
-| gopkg.in/inf.v0                                                                | gopkg.in/inf.v0-v0.9.0                                                                          | BSD 3                |
-| gopkg.in/natefinch/lumberjack.v2                                               | gopkg.in/natefinch/lumberjack.v2-v2.0.0                                                         | MIT                  |
-| gopkg.in/square/go-jose.v2                                                     | gopkg.in/square/go-jose.v2-v2.2.3                                                               | Apache 2.0           |
-| gopkg.in/tchap/go-patricia.v2/patricia                                         | gopkg.in/tchap/go-patricia.v2/patricia-v2.3.0                                                   | MIT                  |
-| gopkg.in/tomb.v1                                                               | gopkg.in/tomb.v1-dd632973f1e7218eb1089048e0798ec9ae7dceb8                                       | BSD 3                |
-| gopkg.in/yaml.v2                                                               | gopkg.in/yaml.v2-v2.4.0                                                                         | Apache 2.0           |
-| graphlib                                                                       | graphlib-2.1.8.tgz                                                                              | MIT                  |
-| gud                                                                            | gud-1.0.0.tgz                                                                                   | MIT                  |
-| has                                                                            | has-1.0.3.tgz                                                                                   | MIT                  |
-| has-flag                                                                       | has-flag-3.0.0.tgz                                                                              | MIT                  |
-| has-symbols                                                                    | has-symbols-1.0.1.tgz                                                                           | MIT                  |
-| has-value                                                                      | has-value-0.3.1.tgz                                                                             | MIT                  |
-| has-value                                                                      | has-value-1.0.0.tgz                                                                             | MIT                  |
-| has-values                                                                     | has-values-0.1.4.tgz                                                                            | MIT                  |
-| has-values                                                                     | has-values-1.0.0.tgz                                                                            | MIT                  |
-| he                                                                             | he-1.2.0.tgz                                                                                    | MIT                  |
-| heap                                                                           | heap-0.2.6.tgz                                                                                  | Python 2.0           |
-| @babel/helper-validator-identifier                                             | helper-validator-identifier-7.10.1.tgz                                                          | MIT                  |
-| @babel/highlight                                                               | highlight-7.10.1.tgz                                                                            | MIT                  |
-| history                                                                        | history-4.9.0.tgz                                                                               | MIT                  |
-| twitter                                                                        | hogan.js                                                                                        | Apache 2.0           |
-| hogan.js                                                                       | hogan.js-3.0.2.tgz                                                                              | Apache 2.0           |
-| hoist-non-react-statics                                                        | hoist-non-react-statics-3.1.0.tgz                                                               | BSD 3                |
-| hoist-non-react-statics                                                        | hoist-non-react-statics-3.3.0.tgz                                                               | BSD 3                |
-| @types/html-minifier-terser                                                    | html-minifier-terser-5.1.0.tgz                                                                  | MIT                  |
-| html-minifier-terser                                                           | html-minifier-terser-5.1.1.tgz                                                                  | MIT                  |
-| html-webpack-plugin                                                            | html-webpack-plugin-4.3.0.tgz                                                                   | MIT                  |
-| htmlparser2                                                                    | htmlparser2-3.10.1.tgz                                                                          | MIT                  |
-| humps                                                                          | humps-2.0.1.tgz                                                                                 | MIT                  |
-| icepick                                                                        | icepick-1.3.0.tgz                                                                               | MIT                  |
-| iconv-lite                                                                     | iconv-lite-0.4.23.tgz                                                                           | MIT                  |
-| idna                                                                           | idna-2.10-py2.py3-none-any.whl                                                                  | BSD 3                |
-| idna                                                                           | idna-2.7-py2.py3-none-any.whl                                                                   | BSD 2                |
-| immutable                                                                      | immutable-3.8.2.tgz                                                                             | MIT                  |
-| importlib-metadata                                                             | importlib\_metadata-2.1.1-py2.py3-none-any.whl                                                  | Apache 2.0           |
-| inherits                                                                       | inherits-2.0.4.tgz                                                                              | ISC                  |
-| instantsearch.js                                                               | instantsearch.production-4.4.1.min.js                                                           | MIT                  |
-| invariant                                                                      | invariant-2.2.2.tgz                                                                             | BSD 3                |
-| invariant                                                                      | invariant-2.2.4.tgz                                                                             | MIT                  |
-| ip-regex                                                                       | ip-regex-2.1.0.tgz                                                                              | MIT                  |
-| ip-regex                                                                       | ip-regex-4.1.0.tgz                                                                              | MIT                  |
-| ipaddr.js                                                                      | ipaddr.js-1.9.1.tgz                                                                             | MIT                  |
-| ipaddress                                                                      | ipaddress-1.0.23-py2.py3-none-any.whl                                                           | Python 2.0           |
-| is-accessor-descriptor                                                         | is-accessor-descriptor-0.1.6.tgz                                                                | MIT                  |
-| is-accessor-descriptor                                                         | is-accessor-descriptor-1.0.0.tgz                                                                | MIT                  |
-| is-buffer                                                                      | is-buffer-1.1.6.tgz                                                                             | MIT                  |
-| is-callable                                                                    | is-callable-1.1.5.tgz                                                                           | MIT                  |
-| is-cidr                                                                        | is-cidr-3.1.0.tgz                                                                               | BSD 2                |
-| is-data-descriptor                                                             | is-data-descriptor-0.1.4.tgz                                                                    | MIT                  |
-| is-data-descriptor                                                             | is-data-descriptor-1.0.0.tgz                                                                    | MIT                  |
-| is-date-object                                                                 | is-date-object-1.0.1.tgz                                                                        | MIT                  |
-| is-descriptor                                                                  | is-descriptor-0.1.6.tgz                                                                         | MIT                  |
-| is-descriptor                                                                  | is-descriptor-1.0.2.tgz                                                                         | MIT                  |
-| is-extendable                                                                  | is-extendable-0.1.1.tgz                                                                         | MIT                  |
-| is-extendable                                                                  | is-extendable-1.0.1.tgz                                                                         | MIT                  |
-| is-ip                                                                          | is-ip-3.1.0.tgz                                                                                 | MIT                  |
-| is-number                                                                      | is-number-3.0.0.tgz                                                                             | MIT                  |
-| is-plain-object                                                                | is-plain-object-2.0.4.tgz                                                                       | MIT                  |
-| is-regex                                                                       | is-regex-1.0.5.tgz                                                                              | MIT                  |
-| is-stream                                                                      | is-stream-1.1.0.tgz                                                                             | MIT                  |
-| is-symbol                                                                      | is-symbol-1.0.3.tgz                                                                             | MIT                  |
-| is-windows                                                                     | is-windows-1.0.2.tgz                                                                            | MIT                  |
-| isarray                                                                        | isarray-0.0.1.tgz                                                                               | MIT                  |
-| isarray                                                                        | isarray-1.0.0.tgz                                                                               | MIT                  |
-| isobject                                                                       | isobject-2.1.0.tgz                                                                              | MIT                  |
-| isobject                                                                       | isobject-3.0.1.tgz                                                                              | MIT                  |
-| isomorphic-fetch                                                               | isomorphic-fetch-2.2.1.tgz                                                                      | MIT                  |
-| jquery                                                                         | jquery-2.2.0.min.js                                                                             | MIT                  |
-| jquery                                                                         | jquery-3.4.0.min.js                                                                             | MIT                  |
-| js-cookie                                                                      | js-cookie-2.2.1.tgz                                                                             | MIT                  |
-| js-tokens                                                                      | js-tokens-3.0.2.tgz                                                                             | MIT                  |
-| js-tokens                                                                      | js-tokens-4.0.0.tgz                                                                             | MIT                  |
-| js-yaml                                                                        | js-yaml-3.14.0.tgz                                                                              | MIT                  |
-| jsan                                                                           | jsan-3.1.13.tgz                                                                                 | MIT                  |
-| json5                                                                          | json5-1.0.1.tgz                                                                                 | MIT                  |
-| jsonpickle                                                                     | jsonpickle-2.0.0-py2.py3-none-any.whl                                                           | BSD 2                |
-| jsrsasign                                                                      | jsrsasign-5.1.0.tgz                                                                             | MIT                  |
-| k8s.io/api                                                                     | k8s.io/api                                                                                      | Apache 2.0           |
-| k8s.io/apiextensions-apiserver/                                                | k8s.io/apiextensions-apiserver/                                                                 | Apache 2.0           |
-| k8s.io/apimachinery                                                            | k8s.io/apimachinery/                                                                            | Apache 2.0           |
-| k8s.io/apiserver                                                               | k8s.io/apiserver                                                                                | Apache 2.0           |
-| k8s.io/client-go                                                               | k8s.io/client-go/                                                                               | Apache 2.0           |
-| k8s.io/component-base/                                                         | k8s.io/component-base/                                                                          | Apache 2.0           |
-| k8s.io/klog                                                                    | k8s.io/klog-v1.0.0                                                                              | Apache 2.0           |
-| k8s.io/kube-aggregator/                                                        | k8s.io/kube-aggregator/                                                                         | Apache 2.0           |
-| k8s.io/kube-openapi/                                                           | k8s.io/kube-openapi                                                                             | Apache 2.0           |
-| k8s.io/kubernetes/                                                             | k8s.io/kubernetes/                                                                              | Apache 2.0           |
-| k8s.io/utils/strings                                                           | k8s.io/utils/strings                                                                            | Apache 2.0           |
-| keycode                                                                        | keycode-2.1.9.tgz                                                                               | MIT                  |
-| kind-of                                                                        | kind-of-3.2.2.tgz                                                                               | MIT                  |
-| kind-of                                                                        | kind-of-4.0.0.tgz                                                                               | MIT                  |
-| kind-of                                                                        | kind-of-5.1.0.tgz                                                                               | MIT                  |
-| kind-of                                                                        | kind-of-6.0.3.tgz                                                                               | MIT                  |
-| kube-controllers                                                               | kube-controllers-v3.0.11                                                                        | Tigera Proprietary   |
-| kube-controllers                                                               | kube-controllers-v3.16.6                                                                        | Tigera Proprietary   |
-| kubernetes                                                                     | kubernetes-12.0.1-py2.py3-none-any.whl                                                          | Apache 2.0           |
-| layout-base                                                                    | layout-base-1.0.2.tgz                                                                           | MIT                  |
-| projectcalico                                                                  | libcalico-go-v3.18.0-0.dev                                                                      | Apache 2.0           |
-| loader-utils                                                                   | loader-utils-1.4.0.tgz                                                                          | MIT                  |
-| lodash                                                                         | lodash-4.17.19.tgz                                                                              | MIT                  |
-| lodash                                                                         | lodash-4.17.20.tgz                                                                              | MIT                  |
-| lodash-es                                                                      | lodash-es-4.17.15.tgz                                                                           | MIT                  |
-| lodash.debounce                                                                | lodash.debounce-4.0.8.tgz                                                                       | MIT                  |
-| lodash.get                                                                     | lodash.get-4.4.2.tgz                                                                            | MIT                  |
-| lodash.isequal                                                                 | lodash.isequal-4.5.0.tgz                                                                        | MIT                  |
-| lodash.throttle                                                                | lodash.throttle-4.1.1.tgz                                                                       | MIT                  |
-| lodash.topath                                                                  | lodash.topath-4.5.2.tgz                                                                         | MIT                  |
-| pimterry                                                                       | loglevel-v1.6.8                                                                                 | MIT                  |
-| loose-envify                                                                   | loose-envify-1.3.1.tgz                                                                          | MIT                  |
-| loose-envify                                                                   | loose-envify-1.4.0.tgz                                                                          | MIT                  |
-| lower-case                                                                     | lower-case-2.0.1.tgz                                                                            | MIT                  |
-| map-cache                                                                      | map-cache-0.2.2.tgz                                                                             | MIT                  |
-| map-visit                                                                      | map-visit-1.0.0.tgz                                                                             | MIT                  |
-| math-expression-evaluator                                                      | math-expression-evaluator-1.2.17.tgz                                                            | MIT                  |
-| megacubo                                                                       | megacubo-br-Megacubo\_15.4.7\_linux\_ia32                                                       | LGPL 2.1             |
-| memoize-one                                                                    | memoize-one-4.0.3.tgz                                                                           | MIT                  |
-| microevent.ts                                                                  | microevent.ts-0.1.1.tgz                                                                         | MIT                  |
-| micromatch                                                                     | micromatch-3.1.10.tgz                                                                           | MIT                  |
-| min-document                                                                   | min-document-2.19.0.tgz                                                                         | MIT                  |
-| mini-create-react-context                                                      | mini-create-react-context-0.3.2.tgz                                                             | MIT                  |
-| minimatch                                                                      | minimatch-3.0.4.tgz                                                                             | ISC                  |
-| minimist                                                                       | minimist-1.2.5.tgz                                                                              | MIT                  |
-| mixin-deep                                                                     | mixin-deep-1.3.2.tgz                                                                            | MIT                  |
-| mkdirp                                                                         | mkdirp-0.3.0.tgz                                                                                | MIT X11              |
-| mocha                                                                          | mocha-1.6.0.js                                                                                  | MIT                  |
-| moment                                                                         | moment-2.22.2.tgz                                                                               | MIT                  |
-| more-itertools                                                                 | more\_itertools-5.0.0-py2-none-any.whl                                                          | MIT                  |
-| ms                                                                             | ms-2.0.0.tgz                                                                                    | MIT                  |
-| nanoid                                                                         | nanoid-2.1.7.tgz                                                                                | MIT                  |
-| nanomatch                                                                      | nanomatch-1.2.13.tgz                                                                            | MIT                  |
-| netaddr                                                                        | netaddr-0.7.19-py2.py3-none-any.whl                                                             | BSD 3                |
-| no-case                                                                        | no-case-3.0.3.tgz                                                                               | MIT                  |
-| @types/node                                                                    | node-9.3.0.tgz                                                                                  | MIT                  |
-| node-fetch                                                                     | node-fetch-1.7.3.tgz                                                                            | MIT                  |
-| nodejs                                                                         | node-v10.23.1                                                                                   | Node.js              |
-| node                                                                           | node-v3.17.2                                                                                    | Tigera Proprietary   |
-| nopt                                                                           | nopt-1.0.10.tgz                                                                                 | MIT                  |
-| nose-timer                                                                     | nose-timer-0.7.1.tar.gz                                                                         | MIT                  |
-| nose-parameterized                                                             | nose\_parameterized-0.6.0-py2.py3-none-any.whl                                                  | BSD 3                |
-| nth-check                                                                      | nth-check-1.0.2.tgz                                                                             | BSD 2                |
-| oauthlib                                                                       | oauthlib-3.1.0-py2.py3-none-any.whl                                                             | BSD 3                |
-| object-assign                                                                  | object-assign-4.1.1.tgz                                                                         | MIT                  |
-| object-copy                                                                    | object-copy-0.1.0.tgz                                                                           | MIT                  |
-| object-inspect                                                                 | object-inspect-1.7.0.tgz                                                                        | MIT                  |
-| object-keys                                                                    | object-keys-1.0.11.tgz                                                                          | MIT                  |
-| object-keys                                                                    | object-keys-1.1.1.tgz                                                                           | MIT                  |
-| object-visit                                                                   | object-visit-1.0.1.tgz                                                                          | MIT                  |
-| object.assign                                                                  | object.assign-4.1.0.tgz                                                                         | MIT                  |
-| object.getownpropertydescriptors                                               | object.getownpropertydescriptors-2.1.0.tgz                                                      | MIT                  |
-| object.pick                                                                    | object.pick-1.3.0.tgz                                                                           | MIT                  |
-| oidc-client                                                                    | oidc-client-1.4.1.tgz                                                                           | Apache 2.0           |
-| openshift                                                                      | origin-v3.6.1                                                                                   | Apache 2.0           |
-| packaging                                                                      | packaging-20.9-py2.py3-none-any.whl                                                             | BSD 2                |
-| param-case                                                                     | param-case-3.0.3.tgz                                                                            | MIT                  |
-| parse-duration                                                                 | parse-duration-0.4.4.tgz                                                                        | MIT                  |
-| pascal-case                                                                    | pascal-case-3.1.1.tgz                                                                           | MIT                  |
-| pascalcase                                                                     | pascalcase-0.1.1.tgz                                                                            | MIT                  |
-| path-to-regexp                                                                 | path-to-regexp-1.7.0.tgz                                                                        | MIT                  |
-| pathlib2                                                                       | pathlib2-2.3.5-py2.py3-none-any.whl                                                             | MIT                  |
-| pegjs                                                                          | pegjs-0.10.0.tgz                                                                                | MIT                  |
-| performance-now                                                                | performance-now-2.1.0.tgz                                                                       | MIT                  |
-| pluggy                                                                         | pluggy-0.13.1-py2.py3-none-any.whl                                                              | MIT                  |
-| popper.js                                                                      | popper-1.16.0.js                                                                                | MIT                  |
-| popper.js                                                                      | popper.js-1.16.1.tgz                                                                            | MIT                  |
-| posix-character-classes                                                        | posix-character-classes-0.1.1.tgz                                                               | MIT                  |
-| pretty-error                                                                   | pretty-error-2.1.1.tgz                                                                          | MIT                  |
-| process                                                                        | process-0.11.10.tgz                                                                             | MIT                  |
-| promise                                                                        | promise-7.3.1.tgz                                                                               | MIT                  |
-| prop-types                                                                     | prop-types-15.5.10.js                                                                           | BSD 3                |
-| prop-types                                                                     | prop-types-15.6.0.tgz                                                                           | MIT                  |
-| prop-types                                                                     | prop-types-15.6.2.js                                                                            | BSD 3                |
-| prop-types                                                                     | prop-types-15.6.2.tgz                                                                           | MIT                  |
-| prop-types                                                                     | prop-types-15.7.2.tgz                                                                           | MIT                  |
-| prop-types-extra                                                               | prop-types-extra-1.0.1.tgz                                                                      | MIT                  |
-| py                                                                             | py-1.10.0-py2.py3-none-any.whl                                                                  | MIT                  |
-| pyasn1                                                                         | pyasn1-0.4.8-py2.py3-none-any.whl                                                               | BSD 2                |
-| pyasn1-modules                                                                 | pyasn1\_modules-0.2.8-py2.py3-none-any.whl                                                      | BSD 2                |
-| pyparsing                                                                      | pyparsing-2.4.7-py2.py3-none-any.whl                                                            | MIT                  |
-| pytest                                                                         | pytest-4.6.11-py2.py3-none-any.whl                                                              | MIT                  |
-| python-dateutil                                                                | python\_dateutil-2.8.1-py2.py3-none-any.whl                                                     | BSD 3                |
-| PyYAML                                                                         | PyYAML-5.4.1-cp27-cp27mu-manylinux1\_x86\_64.whl                                                | MIT                  |
-| raf                                                                            | raf-3.4.0.tgz                                                                                   | MIT                  |
-| raf-schd                                                                       | raf-schd-4.0.0.tgz                                                                              | MIT                  |
-| raven-js                                                                       | raven-js-3.22.1.tgz                                                                             | BSD 2                |
-| react                                                                          | react-15.6.1.js                                                                                 | MIT                  |
-| react                                                                          | react-16.13.1.tgz                                                                               | MIT                  |
-| react                                                                          | react-16.8.6.tgz                                                                                | MIT                  |
-| react-beautiful-dnd                                                            | react-beautiful-dnd-10.0.2.tgz                                                                  | Apache 2.0           |
-| react-bootstrap                                                                | react-bootstrap-0.32.1.tgz                                                                      | MIT                  |
-| react-codemirror2                                                              | react-codemirror2-5.1.0.tgz                                                                     | MIT                  |
-| react-confirm                                                                  | react-confirm-0.1.16.tgz                                                                        | MIT                  |
-| react-cytoscapejs                                                              | react-cytoscapejs-1.2.1.tgz                                                                     | MIT                  |
-| plotly                                                                         | react-cytoscapejs-v1.2.1                                                                        | MIT                  |
-| react-day-picker                                                               | react-day-picker-7.4.8.tgz                                                                      | MIT                  |
-| react-dom                                                                      | react-dom-15.6.1.js                                                                             | MIT                  |
-| react-dom                                                                      | react-dom-16.13.1.tgz                                                                           | MIT                  |
-| react-dom                                                                      | react-dom-16.8.6.tgz                                                                            | MIT                  |
-| react-draggable                                                                | react-draggable-3.0.5.tgz                                                                       | MIT                  |
-| react-fast-compare                                                             | react-fast-compare-2.0.4.tgz                                                                    | MIT                  |
-| react-filter-box                                                               | react-filter-box-3.4.1.tgz                                                                      | MIT                  |
-| @fortawesome/react-fontawesome                                                 | react-fontawesome-0.1.3.tgz                                                                     | MIT                  |
-| react-grid-layout                                                              | react-grid-layout-0.16.3.tgz                                                                    | MIT                  |
-| react-hot-loader                                                               | react-hot-loader-4.12.21.tgz                                                                    | MIT                  |
-| react-input-autosize                                                           | react-input-autosize-2.1.2.tgz                                                                  | MIT                  |
-| JedWatson                                                                      | react-input-autosize-v2.1.2                                                                     | MIT                  |
-| react-is                                                                       | react-is-16.6.3.tgz                                                                             | MIT                  |
-| react-is                                                                       | react-is-16.8.6.tgz                                                                             | MIT                  |
-| react-is                                                                       | react-is-16.9.0.tgz                                                                             | MIT                  |
-| react-json-pretty                                                              | react-json-pretty-2.2.0.tgz                                                                     | MIT                  |
-| react-lifecycles-compat                                                        | react-lifecycles-compat-3.0.4.tgz                                                               | MIT                  |
-| react-native-segmented-control-tab                                             | react-native-segmented-control-tab-3.2.1.tgz                                                    | MIT                  |
-| react-new-window                                                               | react-new-window-0.1.2.tgz                                                                      | MIT                  |
-| react-notification-system                                                      | react-notification-system-0.2.17.tgz                                                            | MIT                  |
-| react-overlays                                                                 | react-overlays-0.8.3.tgz                                                                        | MIT                  |
-| react-prop-types                                                               | react-prop-types-0.4.0.tgz                                                                      | MIT                  |
-| react-querybuilder                                                             | react-querybuilder-3.0.0.tgz                                                                    | MIT                  |
-| react-redux                                                                    | react-redux-5.1.1.tgz                                                                           | MIT                  |
-| react-redux                                                                    | react-redux-7.1.1.tgz                                                                           | MIT                  |
-| react-redux-form                                                               | react-redux-form-1.16.5.tgz                                                                     | MIT                  |
-| react-resizable                                                                | react-resizable-1.7.5.tgz                                                                       | MIT                  |
-| react-resize-detector                                                          | react-resize-detector-2.3.0.tgz                                                                 | MIT                  |
-| react-router                                                                   | react-router-5.0.1.tgz                                                                          | MIT                  |
-| react-router-dom                                                               | react-router-dom-5.0.1.tgz                                                                      | MIT                  |
-| react-show                                                                     | react-show-2.0.4.tgz                                                                            | MIT                  |
-| react-smooth                                                                   | react-smooth-1.0.2.tgz                                                                          | MIT                  |
-| react-split-pane                                                               | react-split-pane-0.1.92.tgz                                                                     | MIT                  |
-| react-style-proptype                                                           | react-style-proptype-3.2.2.tgz                                                                  | MIT                  |
-| react-switch                                                                   | react-switch-5.0.0.tgz                                                                          | MIT                  |
-| react-table-6                                                                  | react-table-6-6.11.0.tgz                                                                        | MIT                  |
-| react-table                                                                    | react-table-7.5.1.tgz                                                                           | MIT                  |
-| react-tooltip                                                                  | react-tooltip-4.2.11.tgz                                                                        | MIT                  |
-| react-transition-group                                                         | react-transition-group-2.2.1.tgz                                                                | BSD 3                |
-| react-transition-group                                                         | react-transition-group-2.7.1.tgz                                                                | BSD 3                |
-| readable-stream                                                                | readable-stream-3.6.0.tgz                                                                       | MIT                  |
-| recharts                                                                       | recharts-1.5.0.tgz                                                                              | MIT                  |
-| recharts-scale                                                                 | recharts-scale-0.4.2.tgz                                                                        | MIT                  |
-| reduce-css-calc                                                                | reduce-css-calc-1.3.0.tgz                                                                       | MIT                  |
-| reduce-function-call                                                           | reduce-function-call-1.0.2.tgz                                                                  | MIT                  |
-| redux                                                                          | redux-4.0.1.tgz                                                                                 | MIT                  |
-| redux                                                                          | redux-4.0.4.tgz                                                                                 | MIT                  |
-| redux-immutable                                                                | redux-immutable-4.0.0.tgz                                                                       | BSD 3                |
-| redux-merge-immutable-reducers                                                 | redux-merge-immutable-reducers-0.1.4.tgz                                                        | MIT                  |
-| redux-thunk                                                                    | redux-thunk-2.3.0.tgz                                                                           | MIT                  |
-| reflect-metadata                                                               | reflect-metadata-0.1.13.tgz                                                                     | Apache 2.0           |
-| regenerator-runtime                                                            | regenerator-runtime-0.11.1.tgz                                                                  | MIT                  |
-| regenerator-runtime                                                            | regenerator-runtime-0.12.1.tgz                                                                  | MIT                  |
-| regenerator-runtime                                                            | regenerator-runtime-0.13.3.tgz                                                                  | MIT                  |
-| regenerator-runtime                                                            | regenerator-runtime-0.13.5.tgz                                                                  | MIT                  |
-| regex-not                                                                      | regex-not-1.0.2.tgz                                                                             | MIT                  |
-| regexp-to-ast                                                                  | regexp-to-ast-0.4.0.tgz                                                                         | MIT                  |
-| relateurl                                                                      | relateurl-0.2.7.tgz                                                                             | MIT                  |
-| remotedev-serialize                                                            | remotedev-serialize-0.1.8.tgz                                                                   | MIT                  |
-| renderkid                                                                      | renderkid-2.0.3.tgz                                                                             | MIT                  |
-| repeat-element                                                                 | repeat-element-1.1.3.tgz                                                                        | MIT                  |
-| repeat-string                                                                  | repeat-string-1.6.1.tgz                                                                         | MIT                  |
-| requests                                                                       | requests-2.20.1-py2.py3-none-any.whl                                                            | Apache 2.0           |
-| requests                                                                       | requests-2.25.1-py2.py3-none-any.whl                                                            | Apache 2.0           |
-| requests-oauthlib                                                              | requests\_oauthlib-1.3.0-py2.py3-none-any.whl                                                   | ISC                  |
-| reselect                                                                       | reselect-2.5.4.tgz                                                                              | MIT                  |
-| @juggle/resize-observer                                                        | resize-observer-3.2.0.tgz                                                                       | Apache 2.0           |
-| resize-observer-polyfill                                                       | resize-observer-polyfill-1.5.1.tgz                                                              | MIT                  |
-| resolve-pathname                                                               | resolve-pathname-2.2.0.tgz                                                                      | MIT                  |
-| resolve-url                                                                    | resolve-url-0.2.1.tgz                                                                           | MIT                  |
-| ret                                                                            | ret-0.1.15.tgz                                                                                  | MIT                  |
-| rsa                                                                            | rsa-4.5-py2.py3-none-any.whl                                                                    | Apache 2.0           |
-| @babel/runtime                                                                 | runtime-7.1.5.tgz                                                                               | MIT                  |
-| @babel/runtime                                                                 | runtime-7.5.5.tgz                                                                               | MIT                  |
-| @babel/runtime-corejs2                                                         | runtime-corejs2-7.1.5.tgz                                                                       | MIT                  |
-| rw                                                                             | rw-1.3.3.tgz                                                                                    | BSD 3                |
-| safe-buffer                                                                    | safe-buffer-5.2.1.tgz                                                                           | MIT                  |
-| safe-regex                                                                     | safe-regex-1.1.0.tgz                                                                            | MIT                  |
-| safer-buffer                                                                   | safer-buffer-2.1.2.tgz                                                                          | MIT                  |
-| scandir                                                                        | scandir-1.10.0.tar.gz                                                                           | BSD 3                |
-| scheduler                                                                      | scheduler-0.13.6.tgz                                                                            | MIT                  |
-| scheduler                                                                      | scheduler-0.18.0.tgz                                                                            | MIT                  |
-| scheduler                                                                      | scheduler-0.19.1.tgz                                                                            | MIT                  |
-| seamless-immutable                                                             | seamless-immutable-7.1.4.tgz                                                                    | BSD 3                |
-| semver                                                                         | semver-5.7.1.tgz                                                                                | ISC                  |
-| set-value                                                                      | set-value-2.0.1.tgz                                                                             | MIT                  |
-| setimmediate                                                                   | setimmediate-1.0.5.tgz                                                                          | MIT                  |
-| setuptools                                                                     | setuptools-44.1.1-py2.py3-none-any.whl                                                          | MIT                  |
-| shallow-compare                                                                | shallow-compare-1.2.2.tgz                                                                       | MIT                  |
-| shallowequal                                                                   | shallowequal-1.1.0.tgz                                                                          | MIT                  |
-| sigs.k8s.io/controller-runtime                                                 | sigs.k8s.io/controller-runtime-v0.7.0                                                           | Apache 2.0           |
-| sigs.k8s.io/kind/pkg/errors                                                    | sigs.k8s.io/kind/pkg/errors-v0.9.0                                                              | Apache 2.0           |
-| sigs.k8s.io/yaml                                                               | sigs.k8s.io/yaml-v1.2.0                                                                         | BSD 3                |
-| simplejson                                                                     | simplejson-3.13.2.tar.gz                                                                        | Academic 2.1         |
-| six                                                                            | six-1.15.0-py2.py3-none-any.whl                                                                 | MIT                  |
-| snapdragon                                                                     | snapdragon-0.8.2.tgz                                                                            | MIT                  |
-| snapdragon-node                                                                | snapdragon-node-2.1.1.tgz                                                                       | MIT                  |
-| snapdragon-util                                                                | snapdragon-util-3.0.1.tgz                                                                       | MIT                  |
-| soupsieve                                                                      | soupsieve-1.9.6-py2.py3-none-any.whl                                                            | MIT                  |
-| @types/source-list-map                                                         | source-list-map-0.1.2.tgz                                                                       | MIT                  |
-| source-map                                                                     | source-map-0.5.7.tgz                                                                            | BSD 3                |
-| source-map                                                                     | source-map-0.6.1.tgz                                                                            | BSD 3                |
-| source-map                                                                     | source-map-0.7.3.tgz                                                                            | BSD 3                |
-| source-map-resolve                                                             | source-map-resolve-0.5.3.tgz                                                                    | MIT                  |
-| source-map-support                                                             | source-map-support-0.5.19.tgz                                                                   | MIT                  |
-| source-map-url                                                                 | source-map-url-0.4.0.tgz                                                                        | MIT                  |
-| split-string                                                                   | split-string-3.1.0.tgz                                                                          | MIT                  |
-| sprintf                                                                        | sprintf-1.0.3.js                                                                                | BSD                  |
-| sprintf-js                                                                     | sprintf-js-1.0.3.tgz                                                                            | BSD 3                |
-| static-extend                                                                  | static-extend-0.1.2.tgz                                                                         | MIT                  |
-| string.prototype.trimend                                                       | string.prototype.trimend-1.0.1.tgz                                                              | MIT                  |
-| string.prototype.trimleft                                                      | string.prototype.trimleft-2.1.2.tgz                                                             | MIT                  |
-| string.prototype.trimright                                                     | string.prototype.trimright-2.1.2.tgz                                                            | MIT                  |
-| string.prototype.trimstart                                                     | string.prototype.trimstart-1.0.1.tgz                                                            | MIT                  |
-| string\_decoder                                                                | string\_decoder-1.3.0.tgz                                                                       | MIT                  |
-| strip-ansi                                                                     | strip-ansi-3.0.1.tgz                                                                            | MIT                  |
-| strongly-connected-components                                                  | strongly-connected-components-1.0.1.tgz                                                         | MIT                  |
-| supports-color                                                                 | supports-color-5.5.0.tgz                                                                        | MIT                  |
-| swagger-ui                                                                     | swagger-ui-bundle-3.37.0.js                                                                     | Apache 2.0           |
-| swagger-ui                                                                     | swagger-ui-standalone-preset-3.37.0.js                                                          | Apache 2.0           |
-| symbol-observable                                                              | symbol-observable-1.2.0.tgz                                                                     | MIT                  |
-| @types/tapable                                                                 | tapable-1.0.5.tgz                                                                               | MIT                  |
-| tapable                                                                        | tapable-1.1.3.tgz                                                                               | MIT                  |
-| Jstarfish                                                                      | Technical-Learning-609d9d75ca68e30aee8757b26f52bf132c644be7                                     | ISC                  |
-| termcolor                                                                      | termcolor-1.1.0.tar.gz                                                                          | MIT                  |
-| terser                                                                         | terser-4.7.0.tgz                                                                                | BSD 2                |
-| tiny-invariant                                                                 | tiny-invariant-1.0.3.tgz                                                                        | MIT                  |
-| tiny-invariant                                                                 | tiny-invariant-1.0.6.tgz                                                                        | MIT                  |
-| tiny-warning                                                                   | tiny-warning-1.0.2.tgz                                                                          | MIT                  |
-| tiny-warning                                                                   | tiny-warning-1.0.3.tgz                                                                          | MIT                  |
-| tippy.js                                                                       | tippy-bundle.iife-5.2.1.min.js                                                                  | MIT                  |
-| tippy.js                                                                       | tippy.js-6.2.5.tgz                                                                              | MIT                  |
-| to-object-path                                                                 | to-object-path-0.3.0.tgz                                                                        | MIT                  |
-| to-regex                                                                       | to-regex-3.0.2.tgz                                                                              | MIT                  |
-| to-regex-range                                                                 | to-regex-range-2.1.1.tgz                                                                        | MIT                  |
-| tslib                                                                          | tslib-1.10.0.js                                                                                 | Apache 2.0           |
-| tslib                                                                          | tslib-1.10.0.tgz                                                                                | Apache 2.0           |
-| tslib                                                                          | tslib-1.13.0.js                                                                                 | Apache 2.0           |
-| tslib                                                                          | tslib.es6-1.10.0.js                                                                             | Apache 2.0           |
-| tslib                                                                          | tslib.es6-1.13.0.js                                                                             | Apache 2.0           |
-| typescript-fsa                                                                 | typescript-fsa-2.5.0.tgz                                                                        | MIT                  |
-| typescript-fsa-reducers                                                        | typescript-fsa-reducers-0.4.5.tgz                                                               | MIT                  |
-| ua-parser-js                                                                   | ua-parser-js-0.7.18.tgz                                                                         | MIT                  |
-| @types/uglify-js                                                               | uglify-js-3.9.2.tgz                                                                             | MIT                  |
-| uncontrollable                                                                 | uncontrollable-4.1.0.tgz                                                                        | MIT                  |
-| union-value                                                                    | union-value-1.0.1.tgz                                                                           | MIT                  |
-| unset-value                                                                    | unset-value-1.0.0.tgz                                                                           | MIT                  |
-| urix                                                                           | urix-0.1.0.tgz                                                                                  | MIT                  |
-| urllib3                                                                        | urllib3-1.24.3-py2.py3-none-any.whl                                                             | MIT                  |
-| urllib3                                                                        | urllib3-1.26.3-py2.py3-none-any.whl                                                             | MIT                  |
-| use                                                                            | use-3.1.1.tgz                                                                                   | MIT                  |
-| util-deprecate                                                                 | util-deprecate-1.0.2.tgz                                                                        | MIT                  |
-| util.promisify                                                                 | util.promisify-1.0.0.tgz                                                                        | MIT                  |
-| utila                                                                          | utila-0.4.0.tgz                                                                                 | MIT                  |
-| uuid                                                                           | uuid-7.0.3.tgz                                                                                  | MIT                  |
-| validator                                                                      | validator-10.4.0.tgz                                                                            | MIT                  |
-| value-equal                                                                    | value-equal-0.4.0.tgz                                                                           | MIT                  |
-| warning                                                                        | warning-3.0.0.tgz                                                                               | BSD 3                |
-| wcwidth                                                                        | wcwidth-0.2.5-py2.py3-none-any.whl                                                              | MIT                  |
-| @types/webpack                                                                 | webpack-4.41.17.tgz                                                                             | MIT                  |
-| @types/webpack-sources                                                         | webpack-sources-1.4.0.tgz                                                                       | MIT                  |
-| websocket\_client                                                              | websocket\_client-0.57.0-py2.py3-none-any.whl                                                   | BSD 3                |
-| whatwg-fetch                                                                   | whatwg-fetch-2.0.4.tgz                                                                          | MIT                  |
-| worker-rpc                                                                     | worker-rpc-0.1.1.tgz                                                                            | MIT                  |
-| zipp                                                                           | zipp-1.2.0-py2.py3-none-any.whl                                                                 | MIT                  |
-| github.com/projectcalico/bird                                                  | github.com/projectcalico/bird/blob/v0.3.3                                                       | GPL                  |
-| egress-gateway                                                                 | egress-gateway                                                                                  | Tigera Proprietary   |
+[Open report in new tab](https://ce-3-22-attribution-report.s3.amazonaws.com/attribution-report.html)
 
 ### REST API Reference
 
